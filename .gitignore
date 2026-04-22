@@ -1,0 +1,9 @@
+build/
+externals/
+vendor/
+.DS_Store
+!source/projects/
+!source/projects/gst.sink~/
+!source/projects/gst.sink~/**
+!source/projects/gst.src~/
+!source/projects/gst.src~/**
