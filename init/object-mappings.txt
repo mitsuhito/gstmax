@@ -1,0 +1,2 @@
+max objectfile mc.gst.sink~ mc.wrapper~ gst.sink~;
+max objectfile mc.gst.src~ mc.wrapper~ gst.src~;

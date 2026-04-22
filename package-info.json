@@ -1,0 +1,21 @@
+{
+  "name": "gstmax",
+  "displayname": "gstmax",
+  "version": "0.1.0",
+  "author": "Mitsuhito Ando",
+  "description": "GStreamer externals for Max/MSP",
+  "tags": ["audio", "gstreamer", "max", "msp"],
+  "website": "",
+  "max_version_min": "8.0.0",
+  "max_version_max": "none",
+  "os": {
+    "macintosh": {
+      "min_version": "10.13",
+      "platform": ["x64", "aarch64"]
+    }
+  },
+  "package_extra": {
+    "reverse_domain": "",
+    "copyright": "Copyright (c) 2026 Mitsuhito Ando"
+  }
+}
