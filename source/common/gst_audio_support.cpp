@@ -211,11 +211,22 @@ std::size_t InterleavedRingBuffer::push_from_deinterleaved(double** inputs, std:
         drop_oldest_unlocked(frames - free_frames);
     }
 
-    for (std::size_t frame = 0; frame < frames; ++frame) {
-        const auto dst_frame = (write_pos_ + frame) % capacity_frames_;
-        for (std::size_t channel = 0; channel < static_cast<std::size_t>(channels_); ++channel) {
-            storage_[(dst_frame * static_cast<std::size_t>(channels_)) + channel] =
-                static_cast<float>(inputs[channel][frame]);
+    const auto channel_count = static_cast<std::size_t>(channels_);
+    // リングバッファの折り返しをまたがないよう2セグメントに分割し、
+    // 内側ループでの modulo を除去してキャッシュフレンドリーにする
+    const auto first_run = std::min(frames, capacity_frames_ - write_pos_);
+    const auto second_run = frames - first_run;
+
+    for (std::size_t frame = 0; frame < first_run; ++frame) {
+        for (std::size_t ch = 0; ch < channel_count; ++ch) {
+            storage_[((write_pos_ + frame) * channel_count) + ch] =
+                static_cast<float>(inputs[ch][frame]);
+        }
+    }
+    for (std::size_t frame = 0; frame < second_run; ++frame) {
+        for (std::size_t ch = 0; ch < channel_count; ++ch) {
+            storage_[(frame * channel_count) + ch] =
+                static_cast<float>(inputs[ch][first_run + frame]);
         }
     }
 

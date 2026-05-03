@@ -414,6 +414,8 @@ private:
 
     void worker_loop()
     {
+        auto last_bus_pump = std::chrono::steady_clock::now();
+
         while (!exit_worker_.load()) {
             ControlAction action = ControlAction::None;
             {
@@ -444,7 +446,13 @@ private:
                 continue;
             }
 
-            pump_bus();
+            // バスポーリングを ~10Hz に制限（try_pull_sample が100Hz でループするため
+            // 毎回呼ぶと3600回/秒 × インスタンス数のオーバーヘッドになる）
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_bus_pump >= std::chrono::milliseconds(100)) {
+                pump_bus();
+                last_bus_pump = now;
+            }
 
             if (!running_.load()) {
                 continue;

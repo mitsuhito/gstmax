@@ -184,11 +184,12 @@ public:
 
     void perform(double** ins, long sampleframes)
     {
-        if (!running_.load() || !ins || sampleframes <= 0) {
+        if (!running_.load(std::memory_order_relaxed) || !ins || sampleframes <= 0) {
             return;
         }
 
         ring_.push_from_deinterleaved(ins, static_cast<std::size_t>(sampleframes));
+        audio_ready_.store(true, std::memory_order_release);
         worker_cv_.notify_one();
     }
 
@@ -466,12 +467,18 @@ private:
 
     void worker_loop()
     {
+        auto last_bus_pump = std::chrono::steady_clock::now();
+
         while (!exit_worker_.load()) {
             ControlAction action = ControlAction::None;
             {
                 std::unique_lock<std::mutex> lock(worker_mutex_);
-                worker_cv_.wait_for(lock, std::chrono::milliseconds(10), [this]() {
-                    return exit_worker_.load() || pending_action_ != ControlAction::None || running_.load();
+                // 旧条件の running_.load() を除去: running_ が true のとき wait が即リターンし
+                // ビジースピンになっていた。audio_ready_ フラグで perform() からの通知を受ける。
+                worker_cv_.wait_for(lock, std::chrono::milliseconds(50), [this]() {
+                    return exit_worker_.load()
+                        || pending_action_ != ControlAction::None
+                        || audio_ready_.load(std::memory_order_relaxed);
                 });
                 action = pending_action_;
                 pending_action_ = ControlAction::None;
@@ -496,11 +503,19 @@ private:
                 continue;
             }
 
-            pump_bus();
+            // バスポーリングを ~10Hz に制限（毎 DSP ベクター呼び出しを避ける）
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last_bus_pump >= std::chrono::milliseconds(100)) {
+                pump_bus();
+                last_bus_pump = now;
+            }
 
             if (!running_.load()) {
                 continue;
             }
+
+            // フラグをクリアしてからリングバッファを読む
+            audio_ready_.store(false, std::memory_order_relaxed);
 
             const auto frames_available = ring_.size_frames();
             if (frames_available == 0) {
@@ -509,12 +524,21 @@ private:
 
             const auto chunk_frames = std::min<std::size_t>(
                 frames_available,
-                static_cast<std::size_t>(std::max(1L, max_vector_size_.load()) * 4));
-            scratch_.assign(chunk_frames * static_cast<std::size_t>(channels_), 0.0f);
+                static_cast<std::size_t>(std::max(1L, max_vector_size_.load()) * 8));
+
+            const auto needed = chunk_frames * static_cast<std::size_t>(channels_);
+            if (scratch_.size() < needed) {
+                scratch_.resize(needed);
+            }
 
             const auto pulled_frames = ring_.pop_interleaved(scratch_.data(), chunk_frames);
             if (pulled_frames == 0) {
                 continue;
+            }
+
+            // まだリングにデータが残っていれば次イテレーションへのフラグを立て直す
+            if (ring_.size_frames() > 0) {
+                audio_ready_.store(true, std::memory_order_relaxed);
             }
 
             GstAppSrc* appsrc = nullptr;
@@ -582,6 +606,7 @@ private:
     std::thread worker_;
     std::atomic<bool> running_;
     std::atomic<bool> exit_worker_;
+    std::atomic<bool> audio_ready_ { false };
     ControlAction pending_action_ { ControlAction::None };
     GstClockTime next_pts_;
     std::vector<float> scratch_;
