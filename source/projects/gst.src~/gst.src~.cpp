@@ -323,7 +323,13 @@ private:
         }
 
         if (pipeline) {
+            // GStreamer 推奨の停止手順: PLAYING→PAUSED→NULL を段階的に踏む。
+            // PLAYING→PAUSED は非同期のため必ず完了を待ってから NULL へ進む。
+            // これにより各要素がソケット等のネットワークリソースを確実に解放する。
+            gst_element_set_state(pipeline, GST_STATE_PAUSED);
+            gst_element_get_state(pipeline, nullptr, nullptr, 3 * GST_SECOND);
             gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_element_get_state(pipeline, nullptr, nullptr, 3 * GST_SECOND);
             gst_object_unref(pipeline);
             if (announce) {
                 object_post(owner_, "%s: stopped", kObjectName);
@@ -493,6 +499,12 @@ private:
             gst_buffer_unmap(buffer, &map);
             gst_sample_unref(sample);
         }
+
+        // ループを exit_worker_ の条件チェックで抜けた場合にも確実にパイプラインを停止する。
+        // gst_app_sink_try_pull_sample(10ms) でブロック中に exit_worker_ が立つと、
+        // タイムアウト後に while 条件でループを抜けて Shutdown アクションハンドラを
+        // 通らないため stop_internal が呼ばれず、udpsrc 等のポートが解放されない。
+        stop_internal(false);
     }
 
     t_object* owner_;
@@ -586,8 +598,8 @@ void gst_src_dsp64(t_gst_src* x, t_object* dsp64, short* count, double samplerat
 
 void gst_src_free(t_gst_src* x)
 {
-    delete x->engine;
     dsp_free((t_pxobject*)x);
+    delete x->engine;
 }
 
 void* gst_src_new(t_symbol* s, long argc, t_atom* argv)

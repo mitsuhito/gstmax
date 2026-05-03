@@ -371,12 +371,19 @@ private:
         ring_.clear();
 
         if (appsrc) {
-            gst_app_src_end_of_stream(appsrc);
+            // EOS を送らずそのまま unref: EOS のダウンストリーム伝播が
+            // 後の状態遷移と競合してネットワークリソースの二重解放を引き起こすため
             gst_object_unref(appsrc);
         }
 
         if (pipeline) {
+            // GStreamer 推奨の停止手順: PLAYING→PAUSED→NULL を段階的に踏む。
+            // PLAYING→PAUSED は非同期のため必ず完了を待ってから NULL へ進む。
+            // これにより各要素がソケット等のネットワークリソースを確実に解放する。
+            gst_element_set_state(pipeline, GST_STATE_PAUSED);
+            gst_element_get_state(pipeline, nullptr, nullptr, 3 * GST_SECOND);
             gst_element_set_state(pipeline, GST_STATE_NULL);
+            gst_element_get_state(pipeline, nullptr, nullptr, 3 * GST_SECOND);
             gst_object_unref(pipeline);
             if (announce) {
                 object_post(owner_, "%s: stopped", kObjectName);
@@ -587,6 +594,12 @@ private:
                 continue;
             }
         }
+
+        // ループを exit_worker_ の条件チェックで抜けた場合にも確実にパイプラインを停止する。
+        // Shutdown アクション処理のパスでは stop_internal + break 済みだが、
+        // gst_app_src_push_buffer 中に exit_worker_ が立った場合は
+        // while 条件でループを抜けるため stop_internal が呼ばれない。
+        stop_internal(false);
     }
 
     t_object* owner_;
@@ -683,8 +696,8 @@ void gst_sink_dsp64(t_gst_sink* x, t_object* dsp64, short* count, double sampler
 
 void gst_sink_free(t_gst_sink* x)
 {
-    delete x->engine;
     dsp_free((t_pxobject*)x);
+    delete x->engine;
 }
 
 void* gst_sink_new(t_symbol* s, long argc, t_atom* argv)
