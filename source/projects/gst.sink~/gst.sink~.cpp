@@ -121,7 +121,7 @@ enum class ControlAction {
 
 class SinkEngine {
 public:
-    SinkEngine(t_object* owner, long channels)
+    SinkEngine(t_object* owner, long channels, method status_fn)
     : owner_(owner)
     , channels_(std::max(1L, channels))
     , sample_rate_(48000.0)
@@ -129,6 +129,7 @@ public:
     , running_(false)
     , exit_worker_(false)
     , next_pts_(0)
+    , status_fn_(status_fn)
     {
         ring_.reset(channels_, 16384);
         worker_ = std::thread(&SinkEngine::worker_loop, this);
@@ -212,7 +213,7 @@ public:
         }
 
         if (pipeline_tail.empty()) {
-            object_error(owner_, "%s: set a pipeline first with the 'pipeline' message", kObjectName);
+            post_status("error", "set a pipeline first with the 'pipeline' message");
             return false;
         }
 
@@ -223,6 +224,22 @@ public:
     void stop()
     {
         request_action(ControlAction::Stop);
+    }
+
+    // ワーカースレッドから defer_low 経由でアウトレットに安全に出力する
+    void post_status(const char* sel, const char* msg = nullptr)
+    {
+        if (!status_fn_) {
+            return;
+        }
+        if (msg) {
+            t_atom atom;
+            atom_setsym(&atom, gensym(msg));
+            defer_low(owner_, status_fn_, gensym(sel), 1, &atom);
+        }
+        else {
+            defer_low(owner_, status_fn_, gensym(sel), 0, nullptr);
+        }
     }
 
 private:
@@ -250,7 +267,7 @@ private:
         }
 
         if (pipeline_tail.empty()) {
-            object_error(owner_, "%s: set a pipeline first with the 'pipeline' message", kObjectName);
+            post_status("error", "set a pipeline first with the 'pipeline' message");
             return false;
         }
 
@@ -271,7 +288,7 @@ private:
         GstElement* pipeline = gst_parse_launch(pipeline_text.c_str(), &error);
 
         if (!pipeline || error) {
-            object_error(owner_, "%s: could not parse pipeline: %s", kObjectName, error ? error->message : "unknown error");
+            post_status("error", error ? error->message : "could not parse pipeline");
             if (error) {
                 g_error_free(error);
             }
@@ -283,7 +300,7 @@ private:
 
         GstElement* appsrc_element = gst_bin_get_by_name(GST_BIN(pipeline), kAppSrcName);
         if (!appsrc_element || !GST_IS_APP_SRC(appsrc_element)) {
-            object_error(owner_, "%s: internal appsrc could not be created", kObjectName);
+            post_status("error", "internal appsrc could not be created");
             if (appsrc_element) {
                 gst_object_unref(appsrc_element);
             }
@@ -299,7 +316,7 @@ private:
 
         GstCaps* appsrc_caps = make_appsrc_caps_from_user_caps(caps_text, channels_, sample_rate_.load());
         if (!appsrc_caps) {
-            object_error(owner_, "%s: invalid audio caps: %s", kObjectName, caps_text.c_str());
+            post_status("error", "invalid audio caps");
             gst_object_unref(appsrc_element);
             gst_element_set_state(pipeline, GST_STATE_NULL);
             gst_object_unref(pipeline);
@@ -311,7 +328,7 @@ private:
 
         const auto state_result = gst_element_set_state(pipeline, GST_STATE_PLAYING);
         if (state_result == GST_STATE_CHANGE_FAILURE) {
-            object_error(owner_, "%s: pipeline failed to enter PLAYING state", kObjectName);
+            post_status("error", "pipeline failed to enter PLAYING state");
             gst_object_unref(appsrc_element);
             gst_element_set_state(pipeline, GST_STATE_NULL);
             gst_object_unref(pipeline);
@@ -321,7 +338,7 @@ private:
         if (state_result == GST_STATE_CHANGE_ASYNC) {
             const auto resolved = gst_element_get_state(pipeline, nullptr, nullptr, 5 * GST_SECOND);
             if (resolved == GST_STATE_CHANGE_FAILURE) {
-                object_error(owner_, "%s: pipeline did not finish starting", kObjectName);
+                post_status("error", "pipeline did not finish starting");
                 gst_object_unref(appsrc_element);
                 gst_element_set_state(pipeline, GST_STATE_NULL);
                 gst_object_unref(pipeline);
@@ -340,7 +357,7 @@ private:
             running_.store(true);
         }
 
-        object_post(owner_, "%s: started", kObjectName);
+        post_status("started");
         return true;
     }
 
@@ -386,7 +403,7 @@ private:
             gst_element_get_state(pipeline, nullptr, nullptr, 3 * GST_SECOND);
             gst_object_unref(pipeline);
             if (announce) {
-                object_post(owner_, "%s: stopped", kObjectName);
+                post_status("stopped");
             }
         }
 
@@ -416,7 +433,7 @@ private:
                 GError* error = nullptr;
                 gchar* debug = nullptr;
                 gst_message_parse_error(message, &error, &debug);
-                object_error(owner_, "%s bus ERROR: %s | dbg: %s", kObjectName, error ? error->message : "unknown", debug ? debug : "none");
+                post_status("error", error ? error->message : "unknown");
                 if (error) {
                     g_error_free(error);
                 }
@@ -430,7 +447,7 @@ private:
                 GError* error = nullptr;
                 gchar* debug = nullptr;
                 gst_message_parse_warning(message, &error, &debug);
-                object_post(owner_, "%s bus WARNING: %s | dbg: %s", kObjectName, error ? error->message : "unknown", debug ? debug : "none");
+                post_status("warning", error ? error->message : "unknown");
                 if (error) {
                     g_error_free(error);
                 }
@@ -440,7 +457,7 @@ private:
                 break;
             }
             case GST_MESSAGE_EOS:
-                object_post(owner_, "%s bus EOS", kObjectName);
+                post_status("eos");
                 should_stop = true;
                 break;
             default:
@@ -623,14 +640,21 @@ private:
     ControlAction pending_action_ { ControlAction::None };
     GstClockTime next_pts_;
     std::vector<float> scratch_;
+    method status_fn_;
 };
 
 typedef struct _gst_sink {
     t_pxobject ob;
     SinkEngine* engine;
+    void* outlet_status;
 } t_gst_sink;
 
 t_class* gst_sink_class = nullptr;
+
+void gst_sink_output_status(t_gst_sink* x, t_symbol* sym, short argc, t_atom* argv)
+{
+    outlet_anything(x->outlet_status, sym, argc, argv);
+}
 
 void gst_sink_assist(t_gst_sink* x, void* b, long m, long a, char* s)
 {
@@ -639,7 +663,7 @@ void gst_sink_assist(t_gst_sink* x, void* b, long m, long a, char* s)
         snprintf(s, 512, "Signal inlet %ld of %ld", a + 1, channel_count);
     }
     else {
-        snprintf(s, 512, "No signal outlets");
+        snprintf(s, 512, "Status: started / stopped / error <msg> / warning <msg> / eos");
     }
 }
 
@@ -711,7 +735,8 @@ void* gst_sink_new(t_symbol* s, long argc, t_atom* argv)
     }
 
     dsp_setup((t_pxobject*)x, channels);
-    x->engine = new SinkEngine((t_object*)x, channels);
+    x->outlet_status = outlet_new((t_object*)x, nullptr);
+    x->engine = new SinkEngine((t_object*)x, channels, (method)gst_sink_output_status);
 
     if (argc > consumed) {
         x->engine->set_pipeline(gstmax::atoms_to_string(argc - consumed, argv + consumed));
